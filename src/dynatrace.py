@@ -1,11 +1,20 @@
 import os
 import sys
 import json
-import time
 import urllib.request
+import urllib.error
+from typing import Optional, Dict, Any
 
-def send_to_dynatrace(url, token, payload, endpoint):
-    """Helper to send HTTP POST requests using standard library"""
+def send_to_dynatrace(url: str, token: str, payload: str, endpoint: str) -> None:
+    """
+    Helper to send HTTP POST requests using standard library.
+    
+    Args:
+        url: The base Dynatrace URL.
+        token: The Dynatrace API token.
+        payload: The string payload (JSON or line protocol).
+        endpoint: The API endpoint path (e.g., 'metrics/ingest').
+    """
     full_url = f"{url}/api/v2/{endpoint}"
     headers = {
         "Authorization": f"Api-Token {token}",
@@ -20,53 +29,68 @@ def send_to_dynatrace(url, token, payload, endpoint):
         with urllib.request.urlopen(req) as response:
             print(f"--- [Dynatrace] Sent {endpoint}: {response.getcode()} ---")
     except urllib.error.HTTPError as e:
-        print(f"!!! [Dynatrace] Error sending {endpoint}: {e.code} - {e.read().decode()} !!!")
+        error_body = e.read().decode()
+        print(f"!!! [Dynatrace] Error sending {endpoint}: {e.code} - {error_body} !!!")
+    except Exception as e:
+        print(f"!!! [Dynatrace] Unexpected error sending {endpoint}: {e} !!!")
 
-def main():
-    # 1. Gather Inputs
-    dt_url = os.environ.get("INPUT_DT_URL")
-    dt_token = os.environ.get("INPUT_DT_TOKEN")
-    stage = os.environ.get("INPUT_STAGE") # e.g., "Build", "Unit Tests"
-    status = os.environ.get("INPUT_STATUS") # e.g., "success", "failure"
-    
-    # Common Tags (The "Smart" part)
-    repo = os.environ.get("GITHUB_REPOSITORY")
-    branch = os.environ.get("GITHUB_REF_NAME")
-    
-    # 2. Handle Metrics (Optional)
-    # Format: "metric_key=value" (Simple) or JSON
-    metric_input = os.environ.get("INPUT_METRICS_KV")
-    if metric_input:
-        # We construct the line protocol: metric.key,dim=val value
-        # Example input: "build.duration=120"
+def process_metrics(dt_url: str, dt_token: str, metric_input: str, repo: str, branch: str, stage: str, status: str) -> None:
+    """Parses and sends metrics to Dynatrace."""
+    try:
+        # Format: "metric_key=value"
         key, value = metric_input.split("=")
         
         # Construct line protocol
-        # Note: We automatically append project and branch to every metric!
+        # metric.key,dim=val value
         line_protocol = f"{key},project={repo},branch={branch},stage={stage},status={status} {value}"
         
         print(f"Sending Metric: {line_protocol}")
         send_to_dynatrace(dt_url, dt_token, line_protocol, "metrics/ingest")
+    except ValueError:
+        print(f"!!! [Dynatrace] Invalid metric format: '{metric_input}'. Expected 'key=value'. Skipping metrics.")
 
-    # 3. Handle Events (Only on Failure or if explicitly requested)
-    # We always send an event if status is failure
-    if status.lower() == "failure" or os.environ.get("INPUT_FORCE_EVENT") == "true":
+def process_events(dt_url: str, dt_token: str, repo: str, branch: str, stage: str, status: str, force: bool) -> None:
+    """Constructs and sends an event to Dynatrace if conditions are met."""
+    if status.lower() == "failure" or force:
         event_payload = json.dumps({
             "eventType": "CUSTOM_INFO",
             "title": f"Pipeline {stage} {status.title()}",
-            "description": f"Workflow failed in {repo} on branch {branch}.",
+            "description": f"Workflow failed in {repo} on branch {branch}." if status.lower() == "failure" else f"Workflow {stage} completed in {repo}.",
             "properties": {
                 "project": repo,
                 "branch": branch,
                 "stage": stage,
-                "ci_provider": "GitHub Actions"
+                "ci_provider": "GitHub Actions",
+                "status": status
             },
-            # Link to the Entity (Optional: Link to a specific generic host or service)
-            # "entitySelector": "type(SERVICE),tag(my-service)" 
         })
         
         print(f"Sending Event: {event_payload}")
         send_to_dynatrace(dt_url, dt_token, event_payload, "events/ingest")
+
+def main() -> None:
+    # 1. Gather Inputs
+    dt_url = os.environ.get("INPUT_DT_URL")
+    dt_token = os.environ.get("INPUT_DT_TOKEN")
+    stage = os.environ.get("INPUT_STAGE")
+    status = os.environ.get("INPUT_STATUS")
+    
+    if not all([dt_url, dt_token, stage, status]):
+        print("!!! [Dynatrace] Missing required inputs. Please check your workflow configuration.")
+        return
+
+    # Common Tags
+    repo = os.environ.get("GITHUB_REPOSITORY", "unknown-repo")
+    branch = os.environ.get("GITHUB_REF_NAME", "unknown-branch")
+    
+    # 2. Handle Metrics
+    metric_input = os.environ.get("INPUT_METRICS_KV")
+    if metric_input:
+        process_metrics(dt_url, dt_token, metric_input, repo, branch, stage, status)
+
+    # 3. Handle Events
+    force_event = os.environ.get("INPUT_FORCE_EVENT", "false").lower() == "true"
+    process_events(dt_url, dt_token, repo, branch, stage, status, force_event)
 
 if __name__ == "__main__":
     main()
