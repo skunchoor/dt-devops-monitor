@@ -40,28 +40,22 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Check if Tag Exists
-        id: check_tag
         run: |
           TAG="v${{ steps.get_version.outputs.version }}"
           if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists. Skipping release."
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "Tag $TAG does not exist. Creating release."
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "::error::Tag $TAG already exists. Please update version in pyproject.toml."
+            exit 1
           fi
 
       - name: Create GitHub Release
-        if: steps.check_tag.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.get_version.outputs.version }}
           generate_release_notes: true
           
       - name: Update Major Version Tag
-        if: steps.check_tag.outputs.exists == 'false'
         uses: actions/publish-action@v0.2.0
         with:
-          tag: v${{ steps.get_version.outputs.version }}
+          source-tag: v${{ steps.get_version.outputs.version }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
